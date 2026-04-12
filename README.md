@@ -60,6 +60,29 @@ docker logs release-notifier
 curl http://localhost:8080/api/health
 ```
  
+## Docker Compose example
+ 
+```yaml
+services:
+  release-notifier:
+    image: 57faruk57/release-notifier:latest
+    container_name: release-notifier
+    restart: unless-stopped
+    volumes:
+      - ./config:/config:ro       # contains containers.yml
+      - ./data:/data               # state and update history
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # for version tracking
+    environment:
+      - ANTHROPIC_API_KEY=your_key
+      - NTFY_URL=https://ntfy.sh/your-topic
+      - GITHUB_TOKEN=your_github_pat   # optional but recommended
+      - API_KEY=your_secret            # optional, protects /api/check
+    ports:
+      - "8080:8080"
+```
+ 
+> **Traefik users:** remove the `ports` block and add your Traefik labels instead. The container exposes port `8080` internally.
+ 
 ## Configuration
  
 ### Environment variables (`.env`)
@@ -126,3 +149,4 @@ MIT — see [LICENSE](LICENSE) for details.
 ## Credits
  
 Built with the assistance of [Claude](https://claude.ai) by Anthropic.
+ 
