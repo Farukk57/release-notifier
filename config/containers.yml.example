@@ -12,6 +12,14 @@ settings:
   # ntfy topic URL — can also be set via NTFY_URL environment variable
   # ntfy_url: "https://ntfy.sh/your-unique-topic"
 
+  # AI provider: claude (default) or ollama
+  # Can also be set via AI_PROVIDER environment variable
+  # ai_provider: claude
+
+  # Ollama settings (only needed if ai_provider is ollama)
+  # ollama_url: http://ollama:11434    # or OLLAMA_URL env var
+  # ollama_model: llama3.2             # or OLLAMA_MODEL env var
+
 containers:
   # Minimal example:
   - name: Immich

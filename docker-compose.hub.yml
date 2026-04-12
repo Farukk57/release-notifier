@@ -9,7 +9,7 @@
 
 services:
   release-notifier:
-    image: 57faruk57/release-notifier:latest
+    image: YOUR_DOCKERHUB_USERNAME/release-notifier:latest
     container_name: release-notifier
     restart: unless-stopped
     volumes:

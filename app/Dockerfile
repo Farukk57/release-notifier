@@ -17,7 +17,9 @@ LABEL org.opencontainers.image.source="https://github.com/Farukk57/release-notif
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Non-root user for security
-RUN groupadd -r notifier && useradd -r -g notifier -s /sbin/nologin notifier
+# UID/GID 1000 matches the default user on most Linux desktops,
+# making volume mounts work without manual chmod.
+RUN groupadd -g 1000 notifier && useradd -u 1000 -g notifier -s /sbin/nologin notifier
 
 WORKDIR /app
 

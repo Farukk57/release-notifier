@@ -38,7 +38,7 @@ _scheduler_ref   = None
 _last_check_at   = None
 _last_check_ok   = None
 _check_lock      = threading.Lock()   # prevents concurrent check_releases runs
-_anthropic_client = None              # created once on first check
+_ai_client = None                     # created once on first check (Anthropic or Ollama)
 _docker_client   = None               # cached Docker client
 
 # ---- performance: pre-compiled regex -----------------------------------------
@@ -393,13 +393,10 @@ def check_pull_status(running_containers, container_name, image_ref, new_tag, do
         return "pull_required", running_version
 
 
-# ---- summarize ---------------------------------------------------------------
+# ---- AI provider helpers ----------------------------------------------------
 
-def summarize_release(client, container_name, version, release_body,
-                      pull_status="unknown", running_version=None):
-    if not release_body or not release_body.strip():
-        return "No release notes provided.", "default"
-
+def _build_prompt(container_name, version, release_body, pull_status, running_version):
+    """Build the shared prompt used by all AI providers."""
     truncated   = release_body[:6000]
     version_ctx = f"Currently running: {running_version}\n" if (running_version and running_version != version) else ""
     pull_ctx    = {
@@ -408,7 +405,7 @@ def summarize_release(client, container_name, version, release_body,
         "unknown":       "",
     }.get(pull_status, "")
 
-    prompt = f"""You are summarizing a software release for a self-hosted homelab enthusiast.
+    return f"""You are summarizing a software release for a self-hosted homelab enthusiast.
 
 Container: {container_name}
 New version: {version}
@@ -442,26 +439,118 @@ One line: either "No breaking changes or migration steps required." or a brief d
 
 Keep each bullet point to one concise sentence. Do not add any intro or outro text beyond the URGENCY line and the summary."""
 
+
+def _parse_ai_response(raw, version, provider_name):
+    """Parse URGENCY line + summary from raw AI response."""
+    lines = raw.strip().split("\n", 1)
+    urgency = "default"
+    summary = raw.strip()
+    if lines[0].strip().startswith("URGENCY:"):
+        urgency_raw = lines[0].replace("URGENCY:", "").strip().lower()
+        if urgency_raw in ("urgent", "high", "default"):
+            urgency = urgency_raw
+        summary = lines[1].strip() if len(lines) > 1 else ""
+        log.info(f"Urgency classified by {provider_name}: {urgency}")
+    return summary, urgency
+
+
+# ---- summarize ---------------------------------------------------------------
+
+def summarize_release(client, container_name, version, release_body,
+                      pull_status="unknown", running_version=None):
+    """
+    Summarize a release using the configured AI provider.
+    client is either an Anthropic instance or an OllamaClient instance.
+    Returns (summary_text, urgency).
+    """
+    if not release_body or not release_body.strip():
+        return "No release notes provided.", "default"
+
+    prompt = _build_prompt(container_name, version, release_body, pull_status, running_version)
+
     try:
-        msg = client.messages.create(
+        raw = client.complete(prompt)
+        return _parse_ai_response(raw, version, client.provider_name)
+    except Exception as e:
+        log.error(f"AI provider error ({client.provider_name}): {e}")
+        return f"Release {version} is available. (AI summary unavailable)", "default"
+
+
+# ---- AI client wrappers ------------------------------------------------------
+
+class AnthropicClient:
+    """Thin wrapper around the Anthropic SDK so summarize_release stays provider-agnostic."""
+    provider_name = "Claude"
+
+    def __init__(self, api_key: str):
+        self._client = Anthropic(api_key=api_key)
+
+    def complete(self, prompt: str) -> str:
+        msg = self._client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=450,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = msg.content[0].text.strip()
-        lines = raw.split("\n", 1)
-        urgency = "default"
-        summary = raw
-        if lines[0].strip().startswith("URGENCY:"):
-            urgency_raw = lines[0].replace("URGENCY:", "").strip().lower()
-            if urgency_raw in ("urgent", "high", "default"):
-                urgency = urgency_raw
-            summary = lines[1].strip() if len(lines) > 1 else ""
-            log.info(f"Urgency classified by Claude: {urgency}")
-        return summary, urgency
-    except Exception as e:
-        log.error(f"Anthropic API error: {e}")
-        return f"Release {version} is available. (AI summary unavailable)", "default"
+        return msg.content[0].text.strip()
+
+
+class OllamaClient:
+    """Calls a local Ollama instance via its REST API."""
+    provider_name = "Ollama"
+
+    def __init__(self, base_url: str, model: str):
+        self._base_url = base_url.rstrip("/")
+        self._model    = model
+        log.info(f"Ollama client initialised: {self._base_url} model={self._model}")
+
+    def complete(self, prompt: str) -> str:
+        r = httpx.post(
+            f"{self._base_url}/api/generate",
+            json={"model": self._model, "prompt": prompt, "stream": False},
+            timeout=120,   # local models can be slow
+        )
+        r.raise_for_status()
+        return r.json()["response"].strip()
+
+    def ping(self) -> bool:
+        """Return True if Ollama is reachable and the model is available."""
+        try:
+            r = httpx.get(f"{self._base_url}/api/tags", timeout=5)
+            r.raise_for_status()
+            models = [m["name"] for m in r.json().get("models", [])]
+            # Accept both "llama3.2" and "llama3.2:latest" style names
+            base = self._model.split(":")[0]
+            return any(m.split(":")[0] == base for m in models)
+        except Exception:
+            return False
+
+
+def build_ai_client(settings: dict):
+    """
+    Build the right AI client based on settings.
+    Priority: env vars > containers.yml settings.
+
+    ai_provider: claude (default) | ollama
+    """
+    provider = (
+        os.environ.get("AI_PROVIDER") or
+        settings.get("ai_provider", "claude")
+    ).lower()
+
+    if provider == "ollama":
+        ollama_url   = os.environ.get("OLLAMA_URL")   or settings.get("ollama_url",   "http://ollama:11434")
+        ollama_model = os.environ.get("OLLAMA_MODEL")  or settings.get("ollama_model", "llama3.2")
+        client = OllamaClient(ollama_url, ollama_model)
+        if not client.ping():
+            log.warning(f"Ollama model '{ollama_model}' not found at {ollama_url} -- summaries may fail. "
+                        f"Run: ollama pull {ollama_model}")
+        return client
+
+    # Default: Claude
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY not set and ai_provider is not ollama")
+    return AnthropicClient(api_key)
 
 
 # ---- ntfy --------------------------------------------------------------------
@@ -507,6 +596,34 @@ def send_ntfy(ntfy_url, container_name, new_version, summary, release_url,
         log.error(f"ntfy error for {container_name}: {e}")
 
 
+# ---- notification dispatcher ------------------------------------------------
+
+def dispatch_notifications(settings, notified, repo, name, tag, summary,
+                            release_url, urgency, pull_status, running_version):
+    """Send ntfy notification with deduplication."""
+    if already_notified(notified, repo, tag):
+        log.info(f"{name} {tag}: notification already sent -- skipping")
+        return False
+
+    ntfy_url   = os.environ.get("NTFY_URL",  settings.get("ntfy_url", ""))
+    ntfy_token = os.environ.get("NTFY_TOKEN", settings.get("ntfy_token"))
+
+    if not ntfy_url:
+        log.warning("NTFY_URL not set -- notifications will be skipped.")
+        return False
+
+    send_ntfy(
+        ntfy_url, name, tag, summary, release_url,
+        urgency=urgency,
+        pull_status=pull_status,
+        running_version=running_version,
+        ntfy_token=ntfy_token,
+    )
+    mark_notified(notified, repo, tag)
+    save_notified(notified)
+    return True
+
+
 # ---- Docker client (cached singleton) ----------------------------------------
 
 def get_docker_client():
@@ -529,7 +646,7 @@ def get_docker_client():
 # ---- main check loop ---------------------------------------------------------
 
 def check_releases():
-    global _last_check_at, _last_check_ok, _anthropic_client
+    global _last_check_at, _last_check_ok, _ai_client
 
     # Prevent concurrent runs
     if not _check_lock.acquire(blocking=False):
@@ -541,22 +658,11 @@ def check_releases():
         cfg      = load_config()
         settings = cfg.get("settings", {})
 
-        ntfy_url     = os.environ.get("NTFY_URL",         settings.get("ntfy_url", ""))
-        ntfy_token   = os.environ.get("NTFY_TOKEN",        settings.get("ntfy_token"))
-        github_token = os.environ.get("GITHUB_TOKEN",      settings.get("github_token"))
-        api_key      = os.environ.get("ANTHROPIC_API_KEY", "")
+        github_token = os.environ.get("GITHUB_TOKEN", settings.get("github_token"))
 
-        if not api_key:
-            log.error("ANTHROPIC_API_KEY not set -- cannot summarize releases.")
-            _last_check_at = datetime.now(timezone.utc).isoformat()
-            _last_check_ok = False
-            return
+        ntfy_url = os.environ.get("NTFY_URL", settings.get("ntfy_url", ""))
         if not ntfy_url:
             log.warning("NTFY_URL not set -- notifications will be skipped.")
-
-        # Reuse cached Anthropic client
-        if _anthropic_client is None:
-            _anthropic_client = Anthropic(api_key=api_key)
 
         docker_client = get_docker_client()
         if docker_client:
@@ -608,22 +714,13 @@ def check_releases():
             log.info(f"{name}: pull_status={pull_status}, running_version={running_version}")
 
             summary, urgency = summarize_release(
-                _anthropic_client, name, tag, body, pull_status, running_version
+                _ai_client, name, tag, body, pull_status, running_version
             )
 
-            if ntfy_url:
-                if already_notified(notified, repo, tag):
-                    log.info(f"{name} {tag}: notification already sent -- skipping")
-                else:
-                    send_ntfy(
-                        ntfy_url, name, tag, summary, release_url,
-                        urgency=urgency,
-                        pull_status=pull_status,
-                        running_version=running_version,
-                        ntfy_token=ntfy_token,
-                    )
-                    mark_notified(notified, repo, tag)
-                    save_notified(notified)
+            dispatch_notifications(
+                settings, notified, repo, name, tag, summary,
+                release_url, urgency, pull_status, running_version,
+            )
 
             record = {
                 "container":       name,
@@ -714,6 +811,7 @@ def api_health():
         "next_check_at":    next_run,
         "check_running":    _check_lock.locked(),
         "auth_enabled":     _get_api_key() is not None,
+        "ai_provider":      _ai_client.provider_name if _ai_client else "not initialised",
     })
 
 
@@ -869,6 +967,14 @@ if __name__ == "__main__":
     scheduler.add_job(check_releases, "interval", hours=interval, next_run_time=datetime.now())
     scheduler.start()
     _scheduler_ref = scheduler
+
+    # Pre-init the AI client at startup so provider is visible in logs immediately
+    try:
+        cfg_settings = cfg.get("settings", {})
+        _ai_client = build_ai_client(cfg_settings)
+        log.info(f"AI provider: {_ai_client.provider_name}")
+    except ValueError as e:
+        log.warning(f"AI client not initialised at startup: {e} (will retry on first check)")
 
     api_key_set = _get_api_key() is not None
     log.info(f"Scheduler started -- checking every {interval}h")
