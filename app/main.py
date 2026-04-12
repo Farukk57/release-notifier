@@ -596,32 +596,175 @@ def send_ntfy(ntfy_url, container_name, new_version, summary, release_url,
         log.error(f"ntfy error for {container_name}: {e}")
 
 
+# ---- Home Assistant notification -------------------------------------------
+
+def send_homeassistant(hass_url, hass_token, hass_service,
+                       container_name, new_version, summary, release_url,
+                       urgency="default", pull_status="unknown",
+                       running_version=None):
+    """
+    Send a push notification via Home Assistant mobile companion app.
+
+    hass_service: the notify service name, e.g. 'mobile_app_your_phone'
+                  or 'notify' to broadcast to all mobile devices.
+    """
+    release_url = safe_url(release_url)
+
+    # Build title
+    if running_version and running_version != new_version and pull_status == "pull_required":
+        title = f"{container_name}: {running_version} -> {new_version}"
+    elif pull_status == "up_to_date":
+        title = f"{container_name} {new_version} - already up to date"
+    elif pull_status == "pull_required":
+        title = f"{container_name} {new_version} - pull required"
+    else:
+        title = f"{container_name} {new_version}"
+
+    # Strip markdown bold markers from summary for plain-text HA notification
+    plain_summary = re.sub(r"\*\*(.+?)\*\*", r"", summary)
+
+    # Base notification data
+    data: dict = {
+        "url": release_url,
+        "clickAction": release_url,
+        "actions": [
+            {
+                "action": "URI",
+                "title": "Release notes",
+                "uri": release_url,
+            }
+        ],
+    }
+
+    # Urgency-specific settings
+    if urgency == "urgent":
+        # iOS: critical alert bypasses silent mode and Do Not Disturb
+        # Android: high priority with alarm channel
+        data.update({
+            "push": {
+                "sound": {
+                    "name": "default",
+                    "critical": 1,
+                    "volume": 1.0,
+                },
+                "interruption-level": "critical",
+            },
+            "channel":      "release-notifier-urgent",
+            "importance":   "high",
+            "ttl":          0,
+            "priority":     "high",
+            "color":        "#f85149",
+            "icon_url":     "https://github.com/Farukk57/release-notifier/raw/main/assets/icon-urgent.png",
+        })
+    elif urgency == "high":
+        data.update({
+            "channel":    "release-notifier-high",
+            "importance": "high",
+            "color":      "#d29922",
+        })
+    else:
+        data.update({
+            "channel":    "release-notifier",
+            "importance": "default",
+            "color":      "#58a6ff",
+        })
+
+    payload = {
+        "title":   title,
+        "message": plain_summary,
+        "data":    data,
+    }
+
+    url     = f"{hass_url.rstrip('/')}/api/services/notify/{hass_service}"
+    headers = {
+        "Authorization": f"Bearer {hass_token}",
+        "Content-Type":  "application/json",
+    }
+
+    try:
+        r = httpx.post(url, json=payload, headers=headers, timeout=10)
+        r.raise_for_status()
+        log.info(f"Sent HA notification for {container_name} {new_version} [urgency={urgency}]")
+    except Exception as e:
+        log.error(f"Home Assistant notify error for {container_name}: {e}")
+        return
+
+    # Also create a persistent notification in the HA UI bell
+    # Format summary for HA: keep markdown as-is since HA does render it
+    # but ensure bullet points use standard markdown syntax
+    ha_summary = re.sub(r"^[•] ", "- ", summary, flags=re.MULTILINE)
+
+    persistent_payload = {
+        "title":           title,
+        "message":         f"{ha_summary}\n\n[Release notes]({release_url})",
+        "notification_id": f"release-notifier-{container_name.lower().replace(' ', '-')}-{new_version}",
+    }
+    persistent_url = f"{hass_url.rstrip('/')}/api/services/persistent_notification/create"
+    try:
+        r2 = httpx.post(persistent_url, json=persistent_payload, headers=headers, timeout=10)
+        r2.raise_for_status()
+        log.info(f"Created HA persistent notification for {container_name} {new_version}")
+    except Exception as e:
+        log.debug(f"HA persistent notification error for {container_name}: {e}")
+
+
 # ---- notification dispatcher ------------------------------------------------
 
 def dispatch_notifications(settings, notified, repo, name, tag, summary,
                             release_url, urgency, pull_status, running_version):
-    """Send ntfy notification with deduplication."""
+    """
+    Send notifications to all configured providers based on notify_provider setting.
+    Handles deduplication — returns True if at least one notification was sent.
+    """
     if already_notified(notified, repo, tag):
         log.info(f"{name} {tag}: notification already sent -- skipping")
         return False
 
-    ntfy_url   = os.environ.get("NTFY_URL",  settings.get("ntfy_url", ""))
-    ntfy_token = os.environ.get("NTFY_TOKEN", settings.get("ntfy_token"))
+    provider = (
+        os.environ.get("NOTIFY_PROVIDER") or
+        settings.get("notify_provider", "ntfy")
+    ).lower()
 
-    if not ntfy_url:
-        log.warning("NTFY_URL not set -- notifications will be skipped.")
-        return False
+    sent = False
 
-    send_ntfy(
-        ntfy_url, name, tag, summary, release_url,
-        urgency=urgency,
-        pull_status=pull_status,
-        running_version=running_version,
-        ntfy_token=ntfy_token,
-    )
-    mark_notified(notified, repo, tag)
-    save_notified(notified)
-    return True
+    # ntfy
+    if provider in ("ntfy", "both"):
+        ntfy_url   = os.environ.get("NTFY_URL",   settings.get("ntfy_url", ""))
+        ntfy_token = os.environ.get("NTFY_TOKEN",  settings.get("ntfy_token"))
+        if ntfy_url:
+            send_ntfy(
+                ntfy_url, name, tag, summary, release_url,
+                urgency=urgency,
+                pull_status=pull_status,
+                running_version=running_version,
+                ntfy_token=ntfy_token,
+            )
+            sent = True
+        else:
+            log.warning("notify_provider includes ntfy but NTFY_URL is not set -- skipping ntfy")
+
+    # Home Assistant
+    if provider in ("homeassistant", "both"):
+        hass_url     = os.environ.get("HASS_URL",            settings.get("hass_url", ""))
+        hass_token   = os.environ.get("HASS_TOKEN",          settings.get("hass_token", ""))
+        hass_service = os.environ.get("HASS_NOTIFY_SERVICE", settings.get("hass_notify_service", "notify"))
+        if hass_url and hass_token:
+            send_homeassistant(
+                hass_url, hass_token, hass_service,
+                name, tag, summary, release_url,
+                urgency=urgency,
+                pull_status=pull_status,
+                running_version=running_version,
+            )
+            sent = True
+        else:
+            log.warning("notify_provider includes homeassistant but HASS_URL or HASS_TOKEN is not set -- skipping HA")
+
+    if sent:
+        mark_notified(notified, repo, tag)
+        save_notified(notified)
+
+    return sent
 
 
 # ---- Docker client (cached singleton) ----------------------------------------
@@ -660,9 +803,15 @@ def check_releases():
 
         github_token = os.environ.get("GITHUB_TOKEN", settings.get("github_token"))
 
-        ntfy_url = os.environ.get("NTFY_URL", settings.get("ntfy_url", ""))
-        if not ntfy_url:
-            log.warning("NTFY_URL not set -- notifications will be skipped.")
+        # Warn if no notification provider is configured
+        provider = (os.environ.get("NOTIFY_PROVIDER") or settings.get("notify_provider", "ntfy")).lower()
+        ntfy_url   = os.environ.get("NTFY_URL",   settings.get("ntfy_url", ""))
+        hass_url   = os.environ.get("HASS_URL",   settings.get("hass_url", ""))
+        hass_token = os.environ.get("HASS_TOKEN", settings.get("hass_token", ""))
+        if provider in ("ntfy", "both") and not ntfy_url:
+            log.warning("NTFY_URL not set -- ntfy notifications will be skipped.")
+        if provider in ("homeassistant", "both") and not (hass_url and hass_token):
+            log.warning("HASS_URL or HASS_TOKEN not set -- Home Assistant notifications will be skipped.")
 
         docker_client = get_docker_client()
         if docker_client:
@@ -812,6 +961,7 @@ def api_health():
         "check_running":    _check_lock.locked(),
         "auth_enabled":     _get_api_key() is not None,
         "ai_provider":      _ai_client.provider_name if _ai_client else "not initialised",
+        "notify_provider":  (os.environ.get("NOTIFY_PROVIDER") or load_config().get("settings", {}).get("notify_provider", "ntfy")),
     })
 
 

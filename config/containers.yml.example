@@ -9,8 +9,17 @@ settings:
   # Can be overridden per container with stable_only: false
   stable_only: true
 
-  # ntfy topic URL — can also be set via NTFY_URL environment variable
+  # ntfy topic URL -- can also be set via NTFY_URL environment variable
   # ntfy_url: "https://ntfy.sh/your-unique-topic"
+
+  # Notification provider: ntfy (default), homeassistant, or both
+  # Can also be set via NOTIFY_PROVIDER environment variable
+  # notify_provider: ntfy
+
+  # Home Assistant settings (only needed if notify_provider is homeassistant or both)
+  # hass_url: http://homeassistant.local:8123    # or HASS_URL env var
+  # hass_token: your_long_lived_token             # or HASS_TOKEN env var
+  # hass_notify_service: mobile_app_your_phone    # or HASS_NOTIFY_SERVICE env var
 
   # AI provider: claude (default) or ollama
   # Can also be set via AI_PROVIDER environment variable

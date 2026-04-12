@@ -3,7 +3,7 @@
 ![Docker Pulls](https://img.shields.io/docker/pulls/57faruk57/release-notifier)
 ![Docker Image Size](https://img.shields.io/docker/image-size/57faruk57/release-notifier/latest)
 
-Watches GitHub releases for your self-hosted Docker stack, summarises changelogs with Claude AI or a local Ollama model, and pushes a push notification to your phone via **ntfy**. Also exposes a small API and dashboard for Homepage integration.
+Watches GitHub releases for your self-hosted Docker stack, summarises changelogs with Claude AI or a local Ollama model, and pushes notifications to your phone via **ntfy** and/or **Home Assistant**. Also exposes a small API and dashboard for Homepage integration.
 
 ## Features
 
@@ -14,6 +14,8 @@ Watches GitHub releases for your self-hosted Docker stack, summarises changelogs
 - OCI label version detection — shows `v1.0.0 -> v1.1.0` in notification titles
 - Pre-release filtering — ignores nightlies and RCs by default
 - Push notifications via ntfy (Android + iOS)
+- Home Assistant integration — mobile push + persistent notification history in the HA bell
+- Critical alert support — urgent releases bypass Do Not Disturb on iOS via HA
 - Deduplication — won't re-notify for versions already sent
 - Retry with exponential backoff on transient failures
 - Homepage iframe dashboard widget
@@ -71,19 +73,19 @@ services:
     container_name: release-notifier
     restart: unless-stopped
     volumes:
-      - ./config:/config:ro       # contains containers.yml
-      - ./data:/data               # state and update history
-      - /var/run/docker.sock:/var/run/docker.sock:ro  # for version tracking
+      - ./config:/config:ro
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - ANTHROPIC_API_KEY=your_key
       - NTFY_URL=https://ntfy.sh/your-topic
-      - GITHUB_TOKEN=your_github_pat   # optional but recommended
-      - API_KEY=your_secret            # optional, protects /api/check
+      - GITHUB_TOKEN=your_github_pat
+      - API_KEY=your_secret
     ports:
       - "8080:8080"
 ```
 
-> **Traefik users:** remove the `ports` block and add your Traefik labels instead. The container exposes port `8080` internally.
+> **Traefik users:** remove the `ports` block and add your Traefik labels instead.
 
 ## Configuration
 
@@ -92,15 +94,20 @@ services:
 | Variable | Required | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Yes* | Claude API key from console.anthropic.com |
-| `NTFY_URL` | Yes | ntfy topic URL, e.g. `https://ntfy.sh/my-topic` |
+| `NTFY_URL` | Yes** | ntfy topic URL, e.g. `https://ntfy.sh/my-topic` |
 | `GITHUB_TOKEN` | Recommended | GitHub PAT (no scopes needed) — avoids 60 req/h rate limit |
 | `NTFY_TOKEN` | Optional | ntfy access token for private topics |
 | `API_KEY` | Optional | Protects `POST /api/check` from unauthenticated triggers |
 | `AI_PROVIDER` | Optional | `claude` (default) or `ollama` |
 | `OLLAMA_URL` | Optional | Ollama base URL, e.g. `http://192.168.1.10:11434` |
 | `OLLAMA_MODEL` | Optional | Ollama model name, e.g. `mistral` |
+| `NOTIFY_PROVIDER` | Optional | `ntfy` (default), `homeassistant`, or `both` |
+| `HASS_URL` | Optional | Home Assistant URL, e.g. `http://homeassistant.local:8123` |
+| `HASS_TOKEN` | Optional | Long-lived access token from your HA profile |
+| `HASS_NOTIFY_SERVICE` | Optional | Notify service name, e.g. `mobile_app_your_phone` |
 
 *Not required if using Ollama.
+**Not required if using Home Assistant only.
 
 ### containers.yml
 
@@ -116,43 +123,64 @@ Each container entry supports:
   stable_only: true     # ignore pre-releases (default: true)
 ```
 
-## Using Ollama (free, local AI)
+## Home Assistant integration
 
-If you don't want to pay for API credits, you can run summaries locally with [Ollama](https://ollama.com). No internet connection required for the AI step.
+Send rich push notifications directly to your phone via the HA companion app, with a persistent notification history in the HA bell icon.
 
 ### Setup
 
-Install Ollama on a machine on your local network:
+**1. Create a long-lived access token in HA:**
+
+Go to your HA profile → **Security** → **Long-lived access tokens** → create one called `release-notifier`.
+
+**2. Find your notify service name:**
+
+Go to **Developer tools** → **Actions** → search `notify.mobile_app` — your phone appears as something like `notify.mobile_app_your_phone`. Use the part after `notify.`.
+
+**3. Configure:**
 
 ```bash
-# Install
+# .env
+NOTIFY_PROVIDER=both              # ntfy + Home Assistant
+HASS_URL=http://homeassistant.local:8123
+HASS_TOKEN=your_long_lived_token
+HASS_NOTIFY_SERVICE=mobile_app_your_phone
+```
+
+### What you get
+
+- Mobile push notification on your phone
+- Persistent notification in the HA bell (stays until dismissed, browsable history)
+- **Urgent** releases → critical alert bypassing Do Not Disturb on iOS
+- **High** releases → high importance notification
+- Tap notification to open the GitHub release page
+
+### Critical alerts on iOS
+
+For urgent releases (CVEs) to bypass silent mode, enable Critical Alerts for the HA app:
+
+**Settings → Notifications → Home → Critical Alerts → On**
+
+## Using Ollama (free, local AI)
+
+Run summaries locally with [Ollama](https://ollama.com) — no API key needed.
+
+```bash
+# Install and start Ollama (listen on all interfaces for Docker access)
 curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull a model
-ollama pull mistral          # recommended — best quality for this use case
-# or
-ollama pull llama3.2         # smaller and faster (~2GB)
-
-# Start with network access (required so Docker containers can reach it)
+ollama pull mistral
 OLLAMA_HOST=0.0.0.0 ollama serve
-```
 
-If your firewall blocks the port:
-```bash
-sudo firewall-cmd --add-port=11434/tcp --permanent
-sudo firewall-cmd --reload
+# Open firewall if needed
+sudo firewall-cmd --add-port=11434/tcp --permanent && sudo firewall-cmd --reload
 ```
-
-### Configure release-notifier
 
 ```bash
 # .env
 AI_PROVIDER=ollama
-OLLAMA_URL=http://192.168.1.10:11434   # IP of the machine running Ollama
+OLLAMA_URL=http://192.168.1.10:11434
 OLLAMA_MODEL=mistral
 ```
-
-No `ANTHROPIC_API_KEY` needed when using Ollama.
 
 ### Recommended models
 
@@ -162,39 +190,16 @@ No `ANTHROPIC_API_KEY` needed when using Ollama.
 | `llama3.2` | ~2GB | Good | Fast |
 | `llama3.1:8b` | ~5GB | Best | Slow |
 
-> **Note:** Ollama responses take 10–60 seconds per summary depending on your hardware, compared to ~3 seconds with Claude. Urgency classification may also be less accurate with smaller models.
-
-### Ollama as a Docker container
-
-If you prefer to run Ollama in Docker alongside release-notifier:
-
-```yaml
-services:
-  ollama:
-    image: ollama/ollama
-    container_name: ollama
-    volumes:
-      - ./ollama:/root/.ollama
-    # Pull the model after first start:
-    # docker exec ollama ollama pull mistral
-
-  release-notifier:
-    image: 57faruk57/release-notifier:latest
-    environment:
-      - AI_PROVIDER=ollama
-      - OLLAMA_URL=http://ollama:11434
-      - OLLAMA_MODEL=mistral
-      - NTFY_URL=https://ntfy.sh/your-topic
-```
+> Note: Ollama responses take 10-60 seconds per summary vs ~3 seconds with Claude.
 
 ## API
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/health` | Status, last/next check time, AI provider, docker socket status |
+| `GET /api/health` | Status, last/next check time, AI provider, docker socket |
 | `GET /api/updates` | Last 10 detected updates as JSON |
 | `GET /api/latest` | Most recent update (for Homepage customapi widget) |
-| `POST /api/check` | Trigger immediate check (requires X-API-Key header if API_KEY is set) |
+| `POST /api/check` | Trigger immediate check (requires X-API-Key if API_KEY is set) |
 | `GET /dashboard` | HTML dashboard (for Homepage iframe widget) |
 
 ## Homepage integration
@@ -208,6 +213,65 @@ services:
       type: iframe
       src: http://release-notifier:8080/dashboard
       classes: h-96
+```
+
+## Switching providers
+
+All providers can be switched by editing your `.env` file and restarting the container. No rebuild needed.
+
+### AI provider
+
+```bash
+# Claude (default) — requires ANTHROPIC_API_KEY
+AI_PROVIDER=claude
+
+# Ollama (free, local) — requires Ollama running on your network
+AI_PROVIDER=ollama
+OLLAMA_URL=http://192.168.1.10:11434
+OLLAMA_MODEL=mistral
+```
+
+### Notification provider
+
+```bash
+# ntfy only (default)
+NOTIFY_PROVIDER=ntfy
+
+# Home Assistant only
+NOTIFY_PROVIDER=homeassistant
+
+# Both simultaneously
+NOTIFY_PROVIDER=both
+```
+
+### Disabling a provider
+
+Simply remove or comment out the relevant lines in `.env`:
+
+```bash
+# Disable ntfy — comment out NTFY_URL
+# NTFY_URL=https://ntfy.sh/your-topic
+
+# Disable Home Assistant — comment out NOTIFY_PROVIDER or set to ntfy
+# NOTIFY_PROVIDER=homeassistant
+
+# Switch back to Claude from Ollama — remove AI_PROVIDER or set to claude
+# AI_PROVIDER=ollama
+```
+
+After any `.env` change, restart the container:
+
+```bash
+docker compose up -d
+# or
+docker restart release-notifier
+```
+
+Check which providers are active:
+
+```bash
+curl http://localhost:8080/api/health
+# Shows: "ai_provider": "Claude", "notify_provider": "both"
 ```
 
 ## Triggering a manual check
