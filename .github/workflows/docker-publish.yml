@@ -7,7 +7,7 @@ on:
   workflow_dispatch:       # allows manual trigger from GitHub UI
 
 env:
-  IMAGE_NAME: YOUR_DOCKERHUB_USERNAME/release-notifier
+  IMAGE_NAME: 57faruk57/release-notifier
 
 jobs:
   build-and-push:
