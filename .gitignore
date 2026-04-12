@@ -1,0 +1,17 @@
+# Secrets
+.env
+*.env
+
+# Runtime data (never commit state)
+data/
+config/containers.yml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/

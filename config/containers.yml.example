@@ -1,0 +1,26 @@
+# release-notifier container configuration
+# Copy this file to containers.yml and edit to match your stack.
+
+settings:
+  # How often to check for new releases (hours)
+  check_interval_hours: 6
+
+  # Only notify for stable releases (no pre-releases, nightlies, RCs)
+  # Can be overridden per container with stable_only: false
+  stable_only: true
+
+  # ntfy topic URL — can also be set via NTFY_URL environment variable
+  # ntfy_url: "https://ntfy.sh/your-unique-topic"
+
+containers:
+  # Minimal example:
+  - name: Immich
+    github: immich-app/immich
+    image: ghcr.io/immich-app/immich-server
+
+  # Full example with all options:
+  # - name: Sonarr
+  #   github: Sonarr/Sonarr
+  #   image: lscr.io/linuxserver/sonarr   # registry image for digest tracking
+  #   container: sonarr                    # actual Docker container name if different from 'name'
+  #   stable_only: false                   # include pre-releases (needed for *arr apps)

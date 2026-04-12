@@ -1,0 +1,117 @@
+# release-notifier
+
+Watches GitHub releases for your self-hosted Docker stack, summarises changelogs with Claude AI, and pushes a push notification to your phone via **ntfy**. Also exposes a small API and dashboard for Homepage integration.
+
+## Features
+
+- Checks GitHub releases on a configurable schedule
+- AI-powered summaries via Claude (what changed, security patches, action required)
+- Urgency classification — urgent for CVEs, high for breaking changes, default otherwise
+- Registry digest tracking — knows whether you've already pulled the new image or not
+- OCI label version detection — shows `v1.0.0 -> v1.1.0` in notification titles
+- Pre-release filtering — ignores nightlies and RCs by default
+- Push notifications via ntfy (Android + iOS)
+- Deduplication — won't re-notify for versions already sent
+- Retry with exponential backoff on transient failures
+- Homepage iframe dashboard widget
+- Production-ready: waitress WSGI, non-root container, XSS protection, optional API key auth
+
+## Quick start
+
+### 1. Install the ntfy app
+
+- Android: https://play.google.com/store/apps/details?id=io.heckel.ntfy
+- iOS: https://apps.apple.com/app/ntfy/id1625396347
+
+Subscribe to a topic, e.g. `ntfy.sh/my-homelab-updates`.
+
+### 2. Get an Anthropic API key
+
+Sign up at https://console.anthropic.com and create an API key.
+
+### 3. Run with Docker
+
+```bash
+mkdir -p release-notifier/config release-notifier/data
+cd release-notifier
+
+# Download example files
+curl -O https://raw.githubusercontent.com/Farukk57/release-notifier/main/docker-compose.hub.yml
+curl -O https://raw.githubusercontent.com/Farukk57/release-notifier/main/.env.example
+curl -O https://raw.githubusercontent.com/Farukk57/release-notifier/main/config/containers.yml.example
+
+cp .env.example .env
+cp config/containers.yml.example config/containers.yml
+
+# Edit both files
+nano .env
+nano config/containers.yml
+
+docker compose -f docker-compose.hub.yml up -d
+```
+
+### 4. Verify
+
+```bash
+docker logs release-notifier
+curl http://localhost:8080/api/health
+```
+
+## Configuration
+
+### Environment variables (`.env`)
+
+| Variable | Required | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Yes | Claude API key from console.anthropic.com |
+| `NTFY_URL` | Yes | ntfy topic URL, e.g. `https://ntfy.sh/my-topic` |
+| `GITHUB_TOKEN` | Recommended | GitHub PAT (no scopes needed) — avoids 60 req/h rate limit |
+| `NTFY_TOKEN` | Optional | ntfy access token for private topics |
+| `API_KEY` | Optional | Protects `POST /api/check` from unauthenticated triggers |
+
+### containers.yml
+
+See `config/containers.yml.example` for a full annotated example.
+
+Each container entry supports:
+
+```yaml
+- name: MyApp           # display name in notifications
+  github: owner/repo    # GitHub repo for release tracking
+  image: ghcr.io/...    # Docker image for digest tracking (optional)
+  container: myapp      # actual Docker container name if different from name (optional)
+  stable_only: true     # ignore pre-releases (default: true)
+```
+
+## API
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/health` | Status, last/next check time, docker socket status |
+| `GET /api/updates` | Last 10 detected updates as JSON |
+| `GET /api/latest` | Most recent update (for Homepage customapi widget) |
+| `POST /api/check` | Trigger immediate check (requires X-API-Key header if API_KEY is set) |
+| `GET /dashboard` | HTML dashboard (for Homepage iframe widget) |
+
+## Homepage integration
+
+```yaml
+# services.yaml
+- Release Notifier:
+    icon: mdi-bell-ring
+    href: https://releases.yourdomain.com
+    widget:
+      type: iframe
+      src: http://release-notifier:8080/dashboard
+      classes: h-96
+```
+
+## Triggering a manual check
+
+```bash
+# Without API key
+curl -X POST http://localhost:8080/api/check
+
+# With API key set
+curl -X POST http://localhost:8080/api/check -H "X-API-Key: your_key"
+```

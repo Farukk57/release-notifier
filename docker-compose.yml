@@ -1,0 +1,32 @@
+# ---- development (builds locally from source) --------------------------------
+# Use this if you've cloned the repo and want to make changes.
+
+services:
+  release-notifier:
+    build: ./app
+    container_name: release-notifier
+    restart: unless-stopped
+    networks:
+      - traefik_internal_proxy
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - NTFY_URL=${NTFY_URL}
+      - NTFY_TOKEN=${NTFY_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - API_KEY=${API_KEY:-}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.release-notifier.rule=Host(`releases.karahan.cc`)"
+      - "traefik.http.routers.release-notifier.entrypoints=websecure"
+      - "traefik.http.routers.release-notifier.tls=true"
+      - "traefik.http.routers.release-notifier.tls.certresolver=hetzner-resolver"
+      - "traefik.http.services.release-notifier.loadbalancer.server.port=8080"
+      - "traefik.docker.network=traefik_internal_proxy"
+
+networks:
+  traefik_internal_proxy:
+    external: true
