@@ -13,6 +13,7 @@ import docker
 import httpx
 import yaml
 from anthropic import Anthropic
+from openai import OpenAI as OpenAISDK
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, request, abort
 
@@ -42,7 +43,9 @@ _ai_client = None                     # created once on first check (Anthropic o
 _docker_client   = None               # cached Docker client
 
 # ---- performance: pre-compiled regex -----------------------------------------
-_RE_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_RE_BOLD        = re.compile(r"\*\*(.+?)\*\*")
+_RE_PRERELEASE  = re.compile(r"(alpha|beta|rc\d*|nightly|dev|preview|unstable|snapshot)", re.IGNORECASE)
+_RE_GITHUB_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 # ---- performance: simple in-memory cache for file reads ----------------------
 _file_cache: dict = {}   # {path: (mtime, data)}
@@ -101,8 +104,14 @@ def load_state():
         return json.loads(p.read_text())
     return _cached_read(STATE_FILE, _read)
 
+def _atomic_write(path: Path, data: str):
+    """Write data atomically using a temp file + rename to avoid corruption."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(data)
+    tmp.rename(path)
+
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    _atomic_write(STATE_FILE, json.dumps(state, indent=2))
     _invalidate_cache(STATE_FILE)
 
 def load_updates():
@@ -113,7 +122,7 @@ def load_updates():
     return _cached_read(UPDATES_FILE, _read)
 
 def save_updates(updates):
-    UPDATES_FILE.write_text(json.dumps(updates, indent=2))
+    _atomic_write(UPDATES_FILE, json.dumps(updates, indent=2))
     _invalidate_cache(UPDATES_FILE)
 
 def load_notified():
@@ -124,7 +133,7 @@ def load_notified():
     return _cached_read(NOTIFIED_FILE, _read)
 
 def save_notified(notified):
-    NOTIFIED_FILE.write_text(json.dumps(notified, indent=2))
+    _atomic_write(NOTIFIED_FILE, json.dumps(notified, indent=2))
     _invalidate_cache(NOTIFIED_FILE)
 
 def already_notified(notified, repo, tag):
@@ -195,12 +204,15 @@ def is_prerelease(release):
     if release.get("draft", False):
         return True
     tag = release.get("tag_name", "").lower()
-    if re.search(r"(alpha|beta|rc\d*|nightly|dev|preview|unstable|snapshot)", tag):
+    if _RE_PRERELEASE.search(tag):
         return True
     return False
 
 
 def get_latest_release(github_repo, github_token=None, stable_only=True):
+    if not _RE_GITHUB_REPO.match(github_repo):
+        log.error(f"Invalid github repo format: '{github_repo}' -- must be 'owner/repo'")
+        return None
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -487,7 +499,7 @@ class AnthropicClient:
 
     def complete(self, prompt: str) -> str:
         msg = self._client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=450,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -525,12 +537,30 @@ class OllamaClient:
             return False
 
 
+class OpenAIClient:
+    """Calls the OpenAI API using the official SDK."""
+
+    def __init__(self, api_key: str, model: str):
+        self._client = OpenAISDK(api_key=api_key)
+        self._model  = model
+        self.provider_name = f"OpenAI ({model})"
+        log.info(f"OpenAI client initialised: model={model}")
+
+    def complete(self, prompt: str) -> str:
+        response = self._client.chat.completions.create(
+            model=self._model,
+            max_tokens=450,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.choices[0].message.content.strip()
+
+
 def build_ai_client(settings: dict):
     """
     Build the right AI client based on settings.
     Priority: env vars > containers.yml settings.
 
-    ai_provider: claude (default) | ollama
+    ai_provider: claude (default) | ollama | openai
     """
     provider = (
         os.environ.get("AI_PROVIDER") or
@@ -546,10 +576,17 @@ def build_ai_client(settings: dict):
                         f"Run: ollama pull {ollama_model}")
         return client
 
+    if provider == "openai":
+        api_key      = os.environ.get("OPENAI_API_KEY")  or settings.get("openai_api_key", "")
+        openai_model = os.environ.get("OPENAI_MODEL")    or settings.get("openai_model", "gpt-4o-mini")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not set and ai_provider is openai")
+        return OpenAIClient(api_key, openai_model)
+
     # Default: Claude
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY not set and ai_provider is not ollama")
+        raise ValueError("ANTHROPIC_API_KEY not set and ai_provider is not ollama or openai")
     return AnthropicClient(api_key)
 
 
@@ -621,7 +658,7 @@ def send_homeassistant(hass_url, hass_token, hass_service,
         title = f"{container_name} {new_version}"
 
     # Strip markdown bold markers from summary for plain-text HA notification
-    plain_summary = re.sub(r"\*\*(.+?)\*\*", r"", summary)
+    plain_summary = _RE_BOLD.sub(r"\1", summary)
 
     # Base notification data
     data: dict = {
@@ -654,7 +691,6 @@ def send_homeassistant(hass_url, hass_token, hass_service,
             "ttl":          0,
             "priority":     "high",
             "color":        "#f85149",
-            "icon_url":     "https://github.com/Farukk57/release-notifier/raw/main/assets/icon-urgent.png",
         })
     elif urgency == "high":
         data.update({
@@ -675,6 +711,10 @@ def send_homeassistant(hass_url, hass_token, hass_service,
         "data":    data,
     }
 
+    # Validate hass_service to prevent path traversal in URL construction
+    if not re.match(r"^[A-Za-z0-9_]+$", hass_service):
+        log.error(f"Invalid HASS_NOTIFY_SERVICE value: '{hass_service}' -- must be alphanumeric/underscore only")
+        return
     url     = f"{hass_url.rstrip('/')}/api/services/notify/{hass_service}"
     headers = {
         "Authorization": f"Bearer {hass_token}",
@@ -692,7 +732,7 @@ def send_homeassistant(hass_url, hass_token, hass_service,
     # Also create a persistent notification in the HA UI bell
     # Format summary for HA: keep markdown as-is since HA does render it
     # but ensure bullet points use standard markdown syntax
-    ha_summary = re.sub(r"^[•] ", "- ", summary, flags=re.MULTILINE)
+    ha_summary = re.sub(r"^[\u2022] ", "- ", summary, flags=re.MULTILINE)
 
     persistent_payload = {
         "title":           title,
@@ -961,7 +1001,7 @@ def api_health():
         "check_running":    _check_lock.locked(),
         "auth_enabled":     _get_api_key() is not None,
         "ai_provider":      _ai_client.provider_name if _ai_client else "not initialised",
-        "notify_provider":  (os.environ.get("NOTIFY_PROVIDER") or load_config().get("settings", {}).get("notify_provider", "ntfy")),
+        "notify_provider":  (os.environ.get("NOTIFY_PROVIDER") or cfg.get("settings", {}).get("notify_provider", "ntfy")),
     })
 
 
@@ -1114,7 +1154,7 @@ if __name__ == "__main__":
     cfg      = load_config()
     interval = cfg.get("settings", {}).get("check_interval_hours", 6)
     scheduler = BackgroundScheduler()
-    scheduler.add_job(check_releases, "interval", hours=interval, next_run_time=datetime.now())
+    scheduler.add_job(check_releases, "interval", hours=interval, next_run_time=datetime.now(timezone.utc))
     scheduler.start()
     _scheduler_ref = scheduler
 
