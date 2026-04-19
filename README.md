@@ -2,6 +2,7 @@
 
 ![Docker Pulls](https://img.shields.io/docker/pulls/57faruk57/release-notifier)
 ![Docker Image Size](https://img.shields.io/docker/image-size/57faruk57/release-notifier/latest)
+![Build](https://github.com/Farukk57/release-notifier/actions/workflows/docker-publish.yml/badge.svg)
 
 Watches GitHub releases for your self-hosted Docker stack, summarises changelogs with Claude, OpenAI, or a local Ollama model, and pushes notifications to your phone via **ntfy** and/or **Home Assistant**. Also exposes a small API and dashboard for Homepage integration.
 
