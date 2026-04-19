@@ -3,12 +3,12 @@
 ![Docker Pulls](https://img.shields.io/docker/pulls/57faruk57/release-notifier)
 ![Docker Image Size](https://img.shields.io/docker/image-size/57faruk57/release-notifier/latest)
 
-Watches GitHub releases for your self-hosted Docker stack, summarises changelogs with Claude AI or a local Ollama model, and pushes notifications to your phone via **ntfy** and/or **Home Assistant**. Also exposes a small API and dashboard for Homepage integration.
+Watches GitHub releases for your self-hosted Docker stack, summarises changelogs with Claude, OpenAI, or a local Ollama model, and pushes notifications to your phone via **ntfy** and/or **Home Assistant**. Also exposes a small API and dashboard for Homepage integration.
 
 ## Features
 
 - Checks GitHub releases on a configurable schedule
-- AI-powered summaries via Claude or local Ollama (what changed, security patches, action required)
+- AI-powered summaries via Claude, OpenAI (gpt-4o-mini / gpt-4o), or local Ollama
 - Urgency classification — urgent for CVEs, high for breaking changes, default otherwise
 - Registry digest tracking — knows whether you've already pulled the new image or not
 - OCI label version detection — shows `v1.0.0 -> v1.1.0` in notification titles
@@ -30,11 +30,11 @@ Watches GitHub releases for your self-hosted Docker stack, summarises changelogs
 
 Subscribe to a topic, e.g. `ntfy.sh/my-homelab-updates`.
 
-### 2. Get an Anthropic API key (or use Ollama)
+### 2. Get an AI API key (or use Ollama)
 
-Sign up at https://console.anthropic.com and create an API key.
-
-Alternatively, see [Using Ollama](#using-ollama-free-local-ai) to run summaries locally for free.
+- **Claude:** sign up at https://console.anthropic.com
+- **OpenAI:** sign up at https://platform.openai.com/api-keys
+- **Ollama:** see [Using Ollama](#using-ollama-free-local-ai) to run locally for free
 
 ### 3. Run with Docker
 
@@ -98,7 +98,9 @@ services:
 | `GITHUB_TOKEN` | Recommended | GitHub PAT (no scopes needed) — avoids 60 req/h rate limit |
 | `NTFY_TOKEN` | Optional | ntfy access token for private topics |
 | `API_KEY` | Optional | Protects `POST /api/check` from unauthenticated triggers |
-| `AI_PROVIDER` | Optional | `claude` (default) or `ollama` |
+| `AI_PROVIDER` | Optional | `claude` (default), `openai`, or `ollama` |
+| `OPENAI_API_KEY` | Optional | OpenAI API key from platform.openai.com |
+| `OPENAI_MODEL` | Optional | `gpt-4o-mini` (default) or `gpt-4o` |
 | `OLLAMA_URL` | Optional | Ollama base URL, e.g. `http://192.168.1.10:11434` |
 | `OLLAMA_MODEL` | Optional | Ollama model name, e.g. `mistral` |
 | `NOTIFY_PROVIDER` | Optional | `ntfy` (default), `homeassistant`, or `both` |
@@ -106,7 +108,7 @@ services:
 | `HASS_TOKEN` | Optional | Long-lived access token from your HA profile |
 | `HASS_NOTIFY_SERVICE` | Optional | Notify service name, e.g. `mobile_app_your_phone` |
 
-*Not required if using Ollama.
+*Not required if using OpenAI or Ollama.
 **Not required if using Home Assistant only.
 
 ### containers.yml
@@ -141,7 +143,7 @@ Go to **Developer tools** → **Actions** → search `notify.mobile_app` — you
 
 ```bash
 # .env
-NOTIFY_PROVIDER=both              # ntfy + Home Assistant
+NOTIFY_PROVIDER=both
 HASS_URL=http://homeassistant.local:8123
 HASS_TOKEN=your_long_lived_token
 HASS_NOTIFY_SERVICE=mobile_app_your_phone
@@ -161,6 +163,27 @@ For urgent releases (CVEs) to bypass silent mode, enable Critical Alerts for the
 
 **Settings → Notifications → Home → Critical Alerts → On**
 
+## Using OpenAI
+
+Use GPT-4o-mini or GPT-4o instead of Claude. OpenAI is significantly cheaper than Claude Sonnet (~$0.15/1M tokens vs ~$3/1M) while producing comparable quality summaries.
+
+```bash
+# .env
+AI_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o-mini   # default — cheap and fast
+# OPENAI_MODEL=gpt-4o      # higher quality, ~17x more expensive
+```
+
+### Model comparison
+
+| Model | Quality | Speed | Cost (per 1M tokens) |
+|---|---|---|---|
+| Claude Sonnet | Best | Fast | ~$3.00 |
+| `gpt-4o` | Best | Medium | ~$2.50 |
+| `gpt-4o-mini` | Good | Fast | ~$0.15 |
+| Ollama mistral | Good | Slow (local) | Free |
+
 ## Using Ollama (free, local AI)
 
 Run summaries locally with [Ollama](https://ollama.com) — no API key needed.
@@ -171,7 +194,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 ollama pull mistral
 OLLAMA_HOST=0.0.0.0 ollama serve
 
-# Open firewall if needed
+# Open firewall if needed (Linux)
 sudo firewall-cmd --add-port=11434/tcp --permanent && sudo firewall-cmd --reload
 ```
 
@@ -190,7 +213,7 @@ OLLAMA_MODEL=mistral
 | `llama3.2` | ~2GB | Good | Fast |
 | `llama3.1:8b` | ~5GB | Best | Slow |
 
-> Note: Ollama responses take 10-60 seconds per summary vs ~3 seconds with Claude.
+> Note: Ollama responses take 10–60 seconds per summary vs ~3 seconds with Claude.
 
 ## API
 
@@ -217,15 +240,20 @@ OLLAMA_MODEL=mistral
 
 ## Switching providers
 
-All providers can be switched by editing your `.env` file and restarting the container. No rebuild needed.
+All providers can be switched by editing `.env` and restarting the container. No rebuild needed.
 
 ### AI provider
 
 ```bash
-# Claude (default) — requires ANTHROPIC_API_KEY
+# Claude (default)
 AI_PROVIDER=claude
 
-# Ollama (free, local) — requires Ollama running on your network
+# OpenAI
+AI_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o-mini
+
+# Ollama (free, local)
 AI_PROVIDER=ollama
 OLLAMA_URL=http://192.168.1.10:11434
 OLLAMA_MODEL=mistral
@@ -244,27 +272,10 @@ NOTIFY_PROVIDER=homeassistant
 NOTIFY_PROVIDER=both
 ```
 
-### Disabling a provider
-
-Simply remove or comment out the relevant lines in `.env`:
-
-```bash
-# Disable ntfy — comment out NTFY_URL
-# NTFY_URL=https://ntfy.sh/your-topic
-
-# Disable Home Assistant — comment out NOTIFY_PROVIDER or set to ntfy
-# NOTIFY_PROVIDER=homeassistant
-
-# Switch back to Claude from Ollama — remove AI_PROVIDER or set to claude
-# AI_PROVIDER=ollama
-```
-
 After any `.env` change, restart the container:
 
 ```bash
 docker compose up -d
-# or
-docker restart release-notifier
 ```
 
 Check which providers are active:
@@ -278,10 +289,12 @@ curl http://localhost:8080/api/health
 
 ```bash
 # Without API key
-curl -X POST http://localhost:8080/api/check
+curl -X POST http://localhost:8080/api/check -H "Content-Length: 0"
 
 # With API key set
-curl -X POST http://localhost:8080/api/check -H "X-API-Key: your_key"
+curl -X POST http://localhost:8080/api/check \
+  -H "X-API-Key: your_key" \
+  -H "Content-Length: 0"
 ```
 
 ## License
