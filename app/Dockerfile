@@ -1,5 +1,5 @@
 # ---- build stage ----
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
 
 WORKDIR /build
 
@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 
 # ---- runtime stage ----
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 LABEL org.opencontainers.image.title="release-notifier"
 LABEL org.opencontainers.image.description="Watches GitHub releases for your Docker stack, summarises changelogs with Claude AI, and pushes notifications via ntfy."
