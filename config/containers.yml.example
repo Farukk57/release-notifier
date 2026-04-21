@@ -36,8 +36,8 @@ containers:
     image: ghcr.io/immich-app/immich-server
 
   # Full example with all options:
-  # - name: Sonarr
-  #   github: Sonarr/Sonarr
-  #   image: lscr.io/linuxserver/sonarr   # registry image for digest tracking
-  #   container: sonarr                    # actual Docker container name if different from 'name'
-  #   stable_only: false                   # include pre-releases (needed for *arr apps)
+  # - name: Vaultwarden
+  #   github: dani-garcia/vaultwarden
+  #   image: vaultwarden/server
+  #   container: vaultwarden
+  #   stable_only: true
